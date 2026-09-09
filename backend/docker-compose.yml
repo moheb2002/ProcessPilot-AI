@@ -1,0 +1,43 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: processpilot-ai-backend:local
+    container_name: processpilot-api
+    env_file:
+      - .env
+    environment:
+      # Override to run the MVP profile without external dependencies.
+      DATABASE_URL: ${DATABASE_URL:-sqlite+aiosqlite:///./processpilot.db}
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+    ports:
+      - "8000:8000"
+    volumes:
+      - processpilot-storage:/app/storage
+      - processpilot-data:/app/data
+    restart: unless-stopped
+
+  # Enable with: docker compose --profile postgres up
+  postgres:
+    image: postgres:16-alpine
+    container_name: processpilot-postgres
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_USER: processpilot
+      POSTGRES_PASSWORD: processpilot
+      POSTGRES_DB: processpilot
+    ports:
+      - "5432:5432"
+    volumes:
+      - processpilot-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U processpilot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  processpilot-storage:
+  processpilot-data:
+  processpilot-postgres:

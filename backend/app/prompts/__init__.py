@@ -1,0 +1,19 @@
+"""Prompt template registry."""
+
+from app.prompts.templates import (
+    AUTOMATION_ADVISOR_PROMPT,
+    BOTTLENECK_DETECTION_PROMPT,
+    EXECUTIVE_SUMMARY_PROMPT,
+    PROCESS_ANALYSIS_PROMPT,
+    ROI_STRATEGY_PROMPT,
+    PromptTemplate,
+)
+
+__all__ = [
+    "AUTOMATION_ADVISOR_PROMPT",
+    "BOTTLENECK_DETECTION_PROMPT",
+    "EXECUTIVE_SUMMARY_PROMPT",
+    "PROCESS_ANALYSIS_PROMPT",
+    "ROI_STRATEGY_PROMPT",
+    "PromptTemplate",
+]
