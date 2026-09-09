@@ -32,7 +32,7 @@ Only propose a non-Microsoft option when no Microsoft service can meet the requi
 
 PROCESS_ANALYSIS_PROMPT = PromptTemplate(
     name="process_analysis",
-    version="1.0.0",
+  version="1.1.0",
     system=(
         "You are a Microsoft-certified business process analyst. You decompose narrative "
         "process descriptions into precise, structured process models. You never invent "
@@ -62,10 +62,13 @@ PROCESS_ANALYSIS_PROMPT = PromptTemplate(
 
 Rules:
 - Steps must be ordered sequentially starting at 1.
+- Every step must be supported by the process description or supporting documents.
+- Preserve explicit actors, systems, decisions, delays and hand-offs from the source.
 - Mark `is_manual` true when a human performs the work without system automation.
 - `manual_tasks` lists the names of repetitive or copy/paste style human tasks.
 - `approvals` lists every approval or sign-off gate.
-- Use "" or [] when information is genuinely absent. Never use null.
+- Do not infer durations. Use null for `estimated_minutes` unless the source states a duration.
+- Use "" or [] for other genuinely absent information.
 
 PROCESS NAME:
 $process_name
@@ -81,7 +84,7 @@ $document_context
 
 BOTTLENECK_DETECTION_PROMPT = PromptTemplate(
     name="bottleneck_detection",
-    version="1.0.0",
+  version="1.1.0",
     system=(
         "You are a lean/six-sigma operations consultant specialising in identifying "
         "delays, rework loops, hand-off friction and control weaknesses in business "
@@ -103,9 +106,13 @@ Return JSON matching exactly this schema:
 }
 
 Rules:
-- Return between 3 and 7 bottlenecks, ordered from most to least severe.
+- Return at most 7 distinct bottlenecks, ordered from most to least severe.
+- Return an empty list when the process model does not support a bottleneck.
 - `severity` must be exactly one of: low, medium, high, critical.
-- `impact` must reference cycle time, cost, quality, risk or employee experience.
+- Tie each bottleneck to specific steps, hand-offs, delays or controls in the process model.
+- `impact` must explain the supported effect on cycle time, cost, quality, risk or employee
+  experience. Never invent quantities, frequencies or monetary values.
+- `recommendation` must address the stated cause rather than only restating the symptom.
 
 STRUCTURED PROCESS MODEL:
 $process_analysis
@@ -115,7 +122,7 @@ $process_analysis
 
 AUTOMATION_ADVISOR_PROMPT = PromptTemplate(
     name="automation_advisor",
-    version="1.0.0",
+  version="1.1.0",
     system=(
         "You are a Microsoft AI solution architect who maps operational pain points to "
         "concrete Microsoft platform capabilities with realistic effort estimates. "
@@ -137,9 +144,13 @@ Return JSON matching exactly this schema:
 }
 
 Rules:
-- Return between 3 and 6 opportunities, ordered by value-to-effort ratio.
+- Return at most 6 distinct opportunities, ordered by value-to-effort ratio.
+- Return an empty list when no opportunity is supported by the supplied evidence.
 - `implementation_effort` must be exactly one of: low, medium, high.
-- Each opportunity must trace back to a specific bottleneck or manual task.
+- Each opportunity must explicitly identify the bottleneck or manual task it addresses.
+- State concrete prerequisites or integration constraints in `business_value` when they affect
+  feasibility. Do not assume APIs, connectors, data quality or licensing are available.
+- Do not claim quantified savings here; ROI is calculated separately from supplied baseline data.
 
 STRUCTURED PROCESS MODEL:
 $process_analysis

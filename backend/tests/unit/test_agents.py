@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
 from app.agents import (
     AutomationAdvisorAgent,
@@ -11,7 +12,16 @@ from app.agents import (
     ProcessAnalyzerAgent,
 )
 from app.core.exceptions import LLMError
-from app.schemas.agent import Effort, ProcessAnalysis, ROIResultSchema, Severity, TokenUsage
+from app.schemas.agent import (
+    AutomationOpportunity,
+    Bottleneck,
+    Effort,
+    ProcessAnalysis,
+    ProcessStep,
+    ROIResultSchema,
+    Severity,
+    TokenUsage,
+)
 
 
 async def test_process_analyzer_extracts_structured_model(mock_llm, sample_description) -> None:
@@ -31,7 +41,12 @@ async def test_process_analyzer_extracts_structured_model(mock_llm, sample_descr
 
 async def test_bottleneck_agent_returns_normalized_severities(mock_llm) -> None:
     agent = BottleneckDetectionAgent(mock_llm)
-    report, _ = await agent.run(analysis=ProcessAnalysis(process_name="Test"))
+    report, _ = await agent.run(
+        analysis=ProcessAnalysis(
+            process_name="Test",
+            steps=[ProcessStep(order=1, name="Review request")],
+        )
+    )
 
     assert len(report.bottlenecks) >= 3
     assert all(isinstance(b.severity, Severity) for b in report.bottlenecks)
@@ -39,7 +54,10 @@ async def test_bottleneck_agent_returns_normalized_severities(mock_llm) -> None:
 
 async def test_automation_advisor_prioritizes_microsoft_stack(mock_llm) -> None:
     agent = AutomationAdvisorAgent(mock_llm)
-    plan, _ = await agent.run(analysis=ProcessAnalysis(), bottlenecks=[])
+    plan, _ = await agent.run(
+        analysis=ProcessAnalysis(steps=[ProcessStep(order=1, name="Review request")]),
+        bottlenecks=[],
+    )
 
     assert plan.opportunities
     assert all(isinstance(o.implementation_effort, Effort) for o in plan.opportunities)
@@ -52,7 +70,10 @@ async def test_executive_summary_contains_required_sections(mock_llm) -> None:
     agent = ExecutiveSummaryAgent(mock_llm)
     report, _ = await agent.run(
         process_name="Employee Onboarding",
-        analysis=ProcessAnalysis(process_name="Employee Onboarding"),
+        analysis=ProcessAnalysis(
+            process_name="Employee Onboarding",
+            steps=[ProcessStep(order=1, name="Review request")],
+        ),
         bottlenecks=[],
         opportunities=[],
         roi=ROIResultSchema(),
@@ -87,3 +108,26 @@ def test_token_usage_addition_is_component_wise() -> None:
         prompt_tokens=1, completion_tokens=2, total_tokens=3
     )
     assert (total.prompt_tokens, total.completion_tokens, total.total_tokens) == (11, 7, 18)
+
+
+def test_process_analysis_rejects_missing_or_nonsequential_steps() -> None:
+    with pytest.raises(PydanticValidationError):
+        ProcessAnalysis.model_validate({})
+
+    with pytest.raises(PydanticValidationError):
+        ProcessAnalysis(steps=[ProcessStep(order=2, name="Review request")])
+
+
+@pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        (Bottleneck, {"title": "Manual handoff", "impact": "", "recommendation": "Fix"}),
+        (
+            AutomationOpportunity,
+            {"solution": "Automate intake", "technology": "", "business_value": "Faster"},
+        ),
+    ],
+)
+def test_agent_outputs_require_evidence_bearing_fields(model, payload) -> None:
+    with pytest.raises(PydanticValidationError):
+        model.model_validate(payload)

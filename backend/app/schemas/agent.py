@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from app.schemas.common import ORMModel
 
@@ -50,19 +50,26 @@ class ProcessAnalysis(ORMModel):
     process_name: str = ""
     actors: list[str] = Field(default_factory=list)
     systems: list[str] = Field(default_factory=list)
-    steps: list[ProcessStep] = Field(default_factory=list)
+    steps: list[ProcessStep] = Field(min_length=1)
     approvals: list[str] = Field(default_factory=list)
     manual_tasks: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_step_sequence(self) -> "ProcessAnalysis":
+        expected_orders = list(range(1, len(self.steps) + 1))
+        if [step.order for step in self.steps] != expected_orders:
+            raise ValueError("step order must be contiguous and start at 1")
+        return self
 
 
 # --------------------------------------------------------------------------- #
 # 2. Bottleneck Detection Agent
 # --------------------------------------------------------------------------- #
 class Bottleneck(ORMModel):
-    title: str
+    title: str = Field(min_length=1)
     severity: Severity = Severity.MEDIUM
-    impact: str = ""
-    recommendation: str = ""
+    impact: str = Field(min_length=1)
+    recommendation: str = Field(min_length=1)
 
     @field_validator("severity", mode="before")
     @classmethod
@@ -71,16 +78,16 @@ class Bottleneck(ORMModel):
 
 
 class BottleneckReport(ORMModel):
-    bottlenecks: list[Bottleneck] = Field(default_factory=list)
+    bottlenecks: list[Bottleneck] = Field(default_factory=list, max_length=7)
 
 
 # --------------------------------------------------------------------------- #
 # 3. Automation Advisor Agent
 # --------------------------------------------------------------------------- #
 class AutomationOpportunity(ORMModel):
-    solution: str
-    technology: str = ""
-    business_value: str = ""
+    solution: str = Field(min_length=1)
+    technology: str = Field(min_length=1)
+    business_value: str = Field(min_length=1)
     implementation_effort: Effort = Effort.MEDIUM
 
     @field_validator("implementation_effort", mode="before")
@@ -90,7 +97,7 @@ class AutomationOpportunity(ORMModel):
 
 
 class AutomationPlan(ORMModel):
-    opportunities: list[AutomationOpportunity] = Field(default_factory=list)
+    opportunities: list[AutomationOpportunity] = Field(default_factory=list, max_length=6)
 
 
 # --------------------------------------------------------------------------- #
