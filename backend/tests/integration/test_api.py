@@ -48,9 +48,14 @@ async def test_analyze_returns_full_pipeline_result(client: AsyncClient) -> None
     body = response.json()
     assert body["analysis"]["process_name"] == "Employee Onboarding"
     assert body["analysis"]["steps"]
+    assert body["process"]["total_steps"] == len(body["analysis"]["steps"])
     assert len(body["bottlenecks"]) >= 3
     assert len(body["opportunities"]) >= 3
-    assert body["roi"]["annual_savings"] > 0
+    assert body["recommendations"]
+    assert body["roi"]["annual_productivity_value"] > 0
+    assert body["roi"]["annual_savings"] == body["roi"]["annual_productivity_value"]
+    assert body["confidence"]["level"] in {"High", "Medium", "Low"}
+    assert body["automation_potential"]["percentage"] > 0
     assert body["analysis_id"]
 
 
@@ -86,13 +91,43 @@ async def test_roi_endpoint_is_deterministic(client: AsyncClient) -> None:
         "/api/v1/process/roi",
         json={
             "monthly_volume": 100,
+            "minutes_per_case": 60,
+            "hourly_cost": 50,
+            "automation_potential_percentage": 50,
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["monthly_productivity_value"] == 2500.0
+    assert body["annual_productivity_value"] == 30000.0
+    assert body["monthly_savings"] == body["monthly_productivity_value"]
+
+
+async def test_roi_endpoint_accepts_legacy_field_names(client: AsyncClient) -> None:
+    response = await client.post(
+        "/api/v1/process/roi",
+        json={
+            "monthly_volume": 100,
             "minutes_per_transaction": 60,
             "employee_hourly_rate": 50,
             "automation_rate": 0.5,
         },
     )
     assert response.status_code == 200
-    assert response.json()["monthly_savings"] == 2500.0
+    assert response.json()["monthly_productivity_value"] == 2500.0
+
+
+async def test_roi_endpoint_rejects_invalid_input(client: AsyncClient) -> None:
+    response = await client.post(
+        "/api/v1/process/roi",
+        json={
+            "monthly_volume": 0,
+            "minutes_per_case": 60,
+            "hourly_cost": 50,
+            "automation_potential_percentage": 50,
+        },
+    )
+    assert response.status_code == 422
 
 
 async def test_report_generation_from_stored_analysis(client: AsyncClient) -> None:
@@ -103,7 +138,8 @@ async def test_report_generation_from_stored_analysis(client: AsyncClient) -> No
         "/api/v1/report/generate", json={"analysis_id": analysis_id}
     )
     assert response.status_code == 200
-    assert "## Implementation Roadmap" in response.json()["report"]
+    assert "## 9. 30-60-90 Day Roadmap" in response.json()["report"]
+    assert "## 8. Business Case and ROI" in response.json()["report"]
 
 
 async def test_report_generation_requires_a_source(client: AsyncClient) -> None:

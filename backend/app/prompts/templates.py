@@ -199,28 +199,42 @@ Employee hourly rate: $employee_hourly_rate
 
 EXECUTIVE_SUMMARY_PROMPT = PromptTemplate(
     name="executive_summary",
-    version="1.0.0",
+    version="2.0.0",
     system=(
-        "You are a principal management consultant writing for a C-level audience. "
-        "You write in crisp, quantified, decision-oriented prose. You output Markdown."
+        "You are a principal management consultant writing for a CIO, COO, operations "
+        "manager or transformation leader. You write crisp, decision-oriented prose.\n\n"
+        "CRITICAL CONSTRAINT: every financial and effort figure has already been calculated "
+        "deterministically by the ProcessPilot ROI engine and is supplied to you as fact. "
+        "You must NOT calculate, estimate, re-derive, adjust, round, annualise or restate "
+        "any number. Do not introduce hours, percentages, currency amounts, headcount or "
+        "payback periods that are not present verbatim in the supplied ROI facts. "
+        "Your job is business interpretation of the supplied numbers, not arithmetic.\n\n"
+        "Respond with a single JSON object and nothing else."
     ),
-    user="""Write an executive report for the process transformation described below.
+    user="""Write the narrative sections of an executive report for the transformation below.
 
-Use exactly these Markdown H2 sections, in this order:
+Return JSON matching exactly this schema:
 
-## Current State
-## Key Pain Points
-## Recommended Solutions
-## Expected Benefits
-## ROI
-## Implementation Roadmap
+{
+  "executive_summary": "string - 3 to 5 sentences framing the opportunity and the ask",
+  "current_state_assessment": "string - how the process runs today and why it constrains the business",
+  "key_pain_points": ["string - one concrete, evidenced pain point per entry"],
+  "roi_interpretation": "string - what the supplied ROI figures mean for the business",
+  "risks": ["string - delivery, adoption, data or compliance risks"],
+  "dependencies": ["string - prerequisites outside the delivery team's control"],
+  "executive_recommendation": "string - the decision you are asking the leadership team to take",
+  "confidence_commentary": "string - explain what the supplied confidence score reflects"
+}
 
 Rules:
-- Open with a one-paragraph executive overview before the first heading.
-- Quantify wherever the supplied data allows; never invent numbers that contradict the ROI data.
-- "Implementation Roadmap" must contain three phases: Quick Wins (0-30 days),
-  Core Automation (1-3 months), Scale & Optimise (3-6 months).
-- Keep the total length under 900 words. Output Markdown only, no code fences.
+- Write in a professional consulting tone. No marketing language, no hedging.
+- Reuse the supplied ROI figures verbatim when you reference them. Never recompute them.
+- Never state a number that is absent from the ROI FACTS block below.
+- `roi_interpretation` must not repeat the arithmetic; explain the operational meaning
+  (recovered capacity, redeployment options, what the remaining hours are spent on).
+- `confidence_commentary` must explain the supplied score. Do not propose a different score.
+- Ground every pain point in the supplied process model or bottlenecks.
+- Keep each string under 150 words. Output JSON only, no code fences.
 
 PROCESS NAME: $process_name
 
@@ -230,10 +244,25 @@ $process_analysis
 BOTTLENECKS:
 $bottlenecks
 
-AUTOMATION OPPORTUNITIES:
-$opportunities
+SCORED RECOMMENDATIONS (priority, impact and score are already final):
+$recommendations
 
-ROI ANALYSIS:
-$roi
+QUICK WINS (already selected by the backend):
+$quick_wins
+
+ANALYSIS CONFIDENCE (calculated by the backend; do not change it):
+$confidence
+
+ROI FACTS — AUTHORITATIVE, DO NOT RECALCULATE:
+Current monthly effort: $current_monthly_hours hours
+Estimated hours saved per month: $estimated_hours_saved hours
+Remaining monthly effort: $remaining_monthly_hours hours
+Monthly productivity value: $monthly_productivity_value
+Annual productivity value: $annual_productivity_value
+Automation potential: $automation_potential_percentage%
+
+ROI ASSUMPTIONS:
+$roi_assumptions
 """,
 )
+

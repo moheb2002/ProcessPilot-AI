@@ -6,34 +6,53 @@ from datetime import datetime
 
 from pydantic import Field, model_validator
 
-from app.schemas.agent import (
-    AutomationOpportunity,
-    Bottleneck,
-    ProcessAnalysis,
-    ROIResultSchema,
-)
 from app.schemas.common import APIModel, ORMModel
+from app.schemas.insight import (
+    AnalysisConfidence,
+    ExecutiveReport,
+    QuickWin,
+    RecommendationDetail,
+    Roadmap,
+)
+from app.schemas.process import ProcessAnalyzeResponse
+from app.schemas.roi import ROIResult
 
 
 class ReportGenerateRequest(APIModel):
-    """Generate a report either from a stored analysis or from an inline payload."""
+    """Generate a report from a stored analysis id, or from a complete analysis object.
+
+    There is deliberately no way to supply ROI inputs here: the report never
+    calculates ROI, it reuses the validated :class:`ROIResult` produced by the
+    analysis pipeline.
+    """
 
     analysis_id: str | None = Field(default=None, description="Id of a persisted analysis.")
-    analysis: ProcessAnalysis | None = None
-    bottlenecks: list[Bottleneck] = Field(default_factory=list)
-    opportunities: list[AutomationOpportunity] = Field(default_factory=list)
-    roi: ROIResultSchema | None = None
+    analysis_result: ProcessAnalyzeResponse | None = Field(
+        default=None,
+        description="A complete, already-validated analysis response to report on.",
+    )
 
     @model_validator(mode="after")
     def _require_source(self) -> "ReportGenerateRequest":
-        if self.analysis_id is None and self.analysis is None:
-            raise ValueError("Provide either 'analysis_id' or an inline 'analysis' object.")
+        if self.analysis_id is None and self.analysis_result is None:
+            raise ValueError(
+                "Provide either 'analysis_id' or a complete 'analysis_result' object."
+            )
         return self
 
 
 class ReportGenerateResponse(ORMModel):
+    """The report plus the exact same ROI object the analysis returned."""
+
     analysis_id: str | None = None
+    #: Rendered Markdown, kept for backwards compatibility with existing clients.
     report: str
+    executive_report: ExecutiveReport = Field(default_factory=ExecutiveReport)
+    roi: ROIResult = Field(default_factory=ROIResult)
+    confidence: AnalysisConfidence = Field(default_factory=AnalysisConfidence)
+    recommendations: list[RecommendationDetail] = Field(default_factory=list)
+    quick_wins: list[QuickWin] = Field(default_factory=list)
+    roadmap: Roadmap = Field(default_factory=Roadmap)
     total_tokens: int = 0
 
 

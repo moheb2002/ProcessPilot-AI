@@ -47,6 +47,7 @@ class MockLLMClient:
             "bottleneck_detection": self._bottlenecks,
             "automation_advisor": self._opportunities,
             "roi_strategy": self._roi_strategy,
+            "executive_summary": self._report_narrative,
         }.get(template_name)
         if builder is None:
             return {}, self._usage(user)
@@ -185,6 +186,56 @@ class MockLLMClient:
                 "Exception rate of roughly 15% still requires human handling.",
                 "Systems of record expose APIs or supported connectors.",
             ],
+        }
+
+    def _report_narrative(self, user: str) -> dict[str, Any]:
+        """Prose only — deliberately contains no figures, mirroring the real prompt."""
+        name = (
+            self._extract_field(user, "PROCESS NAME").splitlines()[0].strip() or "the process"
+        )
+        return {
+            "executive_summary": (
+                f"{name} is delivered today through manual data entry, email hand-offs and "
+                "sequential approvals. The analysis identifies a concentrated pocket of "
+                "repetitive effort that Microsoft Power Platform and Azure AI services can "
+                "remove without re-platforming the systems of record. Leadership is asked to "
+                "approve a phased delivery starting with the Quick Wins."
+            ),
+            "current_state_assessment": (
+                "Work arrives through unstructured channels and is progressed by individuals "
+                "re-keying data between systems of record. Progress is tracked informally, so "
+                "there is no reliable measure of cycle time or backlog, and capacity planning "
+                "relies on anecdote rather than evidence."
+            ),
+            "key_pain_points": [
+                "The same data is re-entered into multiple systems by hand.",
+                "Approvals queue sequentially in personal inboxes with no escalation path.",
+                "Requests arrive by email, so there is no service-level visibility.",
+                "Reviewers locate document fields manually before applying judgement.",
+            ],
+            "roi_interpretation": (
+                "The recovered capacity is best treated as redeployable time rather than a "
+                "headcount reduction. The remaining effort concentrates on exception handling "
+                "and judgement, which is where the team adds most value."
+            ),
+            "risks": [
+                "Connector or API availability for the systems of record is unconfirmed.",
+                "Adoption depends on approvers moving out of email and into Teams.",
+                "Document extraction quality must be validated against a representative sample.",
+            ],
+            "dependencies": [
+                "Power Platform environment with appropriate licensing.",
+                "Data owner sign-off for automated writes to the system of record.",
+            ],
+            "executive_recommendation": (
+                "Approve the Quick Wins immediately and fund a single delivery squad for the "
+                "first quarter, with a value review at the end of the roadmap."
+            ),
+            "confidence_commentary": (
+                "The score reflects the completeness of the supplied process narrative and the "
+                "availability of baseline operational metrics. Closing the listed gaps would "
+                "raise it."
+            ),
         }
 
     def _executive_report(self, user: str) -> str:

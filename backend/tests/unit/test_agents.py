@@ -18,10 +18,11 @@ from app.schemas.agent import (
     Effort,
     ProcessAnalysis,
     ProcessStep,
-    ROIResultSchema,
+    ROIResult,
     Severity,
     TokenUsage,
 )
+from app.schemas.insight import AnalysisConfidence, ReportNarrative
 
 
 async def test_process_analyzer_extracts_structured_model(mock_llm, sample_description) -> None:
@@ -66,28 +67,45 @@ async def test_automation_advisor_prioritizes_microsoft_stack(mock_llm) -> None:
     assert "azure" in technologies
 
 
-async def test_executive_summary_contains_required_sections(mock_llm) -> None:
+async def test_executive_summary_returns_prose_without_numbers(mock_llm) -> None:
     agent = ExecutiveSummaryAgent(mock_llm)
-    report, _ = await agent.run(
+    narrative, usage = await agent.run(
         process_name="Employee Onboarding",
         analysis=ProcessAnalysis(
             process_name="Employee Onboarding",
             steps=[ProcessStep(order=1, name="Review request")],
         ),
         bottlenecks=[],
-        opportunities=[],
-        roi=ROIResultSchema(),
+        recommendations=[],
+        quick_wins=[],
+        confidence=AnalysisConfidence(score=80, level="Medium"),
+        roi=ROIResult(),
     )
 
-    for section in (
-        "## Current State",
-        "## Key Pain Points",
-        "## Recommended Solutions",
-        "## Expected Benefits",
-        "## ROI",
-        "## Implementation Roadmap",
-    ):
-        assert section in report
+    assert isinstance(narrative, ReportNarrative)
+    assert narrative.executive_summary
+    assert narrative.key_pain_points
+    assert usage.total_tokens > 0
+
+
+async def test_executive_summary_survives_a_malformed_payload() -> None:
+    class BrokenLLM:
+        async def complete_json(self, *, system, user, template_name):
+            return {"key_pain_points": "not-a-list"}, TokenUsage(total_tokens=1)
+
+        async def complete_text(self, *, system, user, template_name):
+            return "", TokenUsage()
+
+    narrative, _ = await ExecutiveSummaryAgent(BrokenLLM()).run(
+        process_name="X",
+        analysis=ProcessAnalysis(steps=[ProcessStep(order=1, name="Step")]),
+        bottlenecks=[],
+        recommendations=[],
+        quick_wins=[],
+        confidence=AnalysisConfidence(),
+        roi=ROIResult(),
+    )
+    assert narrative == ReportNarrative()
 
 
 async def test_agent_raises_llm_error_on_invalid_payload() -> None:

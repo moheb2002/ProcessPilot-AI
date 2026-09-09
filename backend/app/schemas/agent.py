@@ -2,11 +2,30 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from enum import StrEnum
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from app.schemas.common import ORMModel
+from app.schemas.roi import ROICalculationInput, ROIResult, ROIResultSchema, to_decimal
+
+__all__ = [
+    "AutomationOpportunity",
+    "AutomationPlan",
+    "Bottleneck",
+    "BottleneckReport",
+    "Effort",
+    "ExecutiveReport",
+    "ProcessAnalysis",
+    "ProcessStep",
+    "ROICalculationInput",
+    "ROIInput",
+    "ROIResult",
+    "ROIResultSchema",
+    "Severity",
+    "TokenUsage",
+]
 
 
 class Severity(StrEnum):
@@ -104,21 +123,82 @@ class AutomationPlan(ORMModel):
 # 4. ROI Agent
 # --------------------------------------------------------------------------- #
 class ROIInput(ORMModel):
+    """Lenient, API-facing baseline metrics.
+
+    Kept permissive so an analysis can run without financial data. Call
+    :meth:`to_calculation_input` to obtain the strictly validated
+    :class:`~app.schemas.roi.ROICalculationInput` that the ROI service requires.
+    """
+
+    model_config = ConfigDict(from_attributes=True, extra="ignore", populate_by_name=True)
+
     monthly_volume: int = Field(default=0, ge=0, le=10_000_000)
-    minutes_per_transaction: float = Field(default=0, ge=0, le=100_000)
-    employee_hourly_rate: float = Field(default=0, ge=0, le=10_000)
-    automation_rate: float = Field(
-        default=0.6, ge=0, le=1, description="Share of effort expected to be automated."
+    minutes_per_case: Decimal = Field(
+        default=Decimal(0),
+        ge=0,
+        le=100_000,
+        validation_alias=AliasChoices("minutes_per_case", "minutes_per_transaction"),
     )
-    implementation_cost: float = Field(default=0, ge=0)
+    hourly_cost: Decimal = Field(
+        default=Decimal(0),
+        ge=0,
+        le=10_000,
+        validation_alias=AliasChoices("hourly_cost", "employee_hourly_rate"),
+    )
+    automation_potential_percentage: Decimal | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description=(
+            "Share of current effort expected to be automated, 0-100. "
+            "When omitted the ROI agent estimates it once and reuses it everywhere."
+        ),
+        validation_alias=AliasChoices(
+            "automation_potential_percentage", "automation_potential", "reduction_percentage"
+        ),
+    )
+    implementation_cost: Decimal = Field(default=Decimal(0), ge=0)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_automation_rate(cls, data: object) -> object:
+        """Accept the legacy 0-1 ``automation_rate`` and normalise it to a percentage."""
+        if isinstance(data, dict) and "automation_rate" in data:
+            rate = data.get("automation_rate")
+            if rate is not None and data.get("automation_potential_percentage") is None:
+                data = {**data, "automation_potential_percentage": to_decimal(rate) * 100}
+        return data
 
-class ROIResultSchema(ORMModel):
-    current_hours: float = 0
-    estimated_hours_saved: float = 0
-    monthly_savings: float = 0
-    annual_savings: float = 0
-    roi_score: float = 0
+    @field_validator(
+        "minutes_per_case", "hourly_cost", "automation_potential_percentage", "implementation_cost",
+        mode="before",
+    )
+    @classmethod
+    def _as_decimal(cls, value: object) -> object:
+        return value if value is None else to_decimal(value)
+
+    @field_serializer("minutes_per_case", "hourly_cost", "implementation_cost")
+    def _serialize_decimal(self, value: Decimal) -> float:
+        return float(value)
+
+    @field_serializer("automation_potential_percentage")
+    def _serialize_optional_decimal(self, value: Decimal | None) -> float | None:
+        return None if value is None else float(value)
+
+    @property
+    def has_baseline_metrics(self) -> bool:
+        """True when volume and handling time are sufficient to calculate ROI."""
+        return self.monthly_volume > 0 and self.minutes_per_case > 0
+
+    def to_calculation_input(self, automation_potential_percentage: Decimal) -> ROICalculationInput:
+        """Build the strict calculation input. Raises when metrics are missing."""
+        return ROICalculationInput(
+            monthly_volume=self.monthly_volume,
+            minutes_per_case=self.minutes_per_case,
+            hourly_cost=self.hourly_cost,
+            automation_potential_percentage=automation_potential_percentage,
+            implementation_cost=self.implementation_cost,
+        )
 
 
 # --------------------------------------------------------------------------- #

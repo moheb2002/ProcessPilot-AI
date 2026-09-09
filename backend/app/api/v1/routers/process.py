@@ -6,14 +6,15 @@ from fastapi import APIRouter, Depends, status
 
 from app.api.deps import AnalysisServiceDep, CurrentUserDep, PaginationDep, require_role
 from app.core.security import Role
-from app.schemas.agent import ROIInput, ROIResultSchema
 from app.schemas.common import Page
 from app.schemas.process import (
     AnalysisSummary,
     ProcessAnalyzeRequest,
     ProcessAnalyzeResponse,
 )
-from app.agents.roi_agent import calculate_roi
+from app.schemas.roi import ROICalculationInput, ROIResult
+from app.services.analysis_service import AnalysisService
+from app.services.roi_service import calculate_roi
 
 router = APIRouter(prefix="/process", tags=["Process Analysis"])
 
@@ -38,10 +39,15 @@ async def analyze_process(
 
 @router.post(
     "/roi",
-    response_model=ROIResultSchema,
+    response_model=ROIResult,
     summary="Calculate ROI from baseline metrics without invoking the LLM",
+    description=(
+        "Runs the deterministic ROI engine that every other surface reuses. "
+        "The same formulas and rounding rules power the analysis response and "
+        "the executive report."
+    ),
 )
-async def calculate_roi_endpoint(payload: ROIInput) -> ROIResultSchema:
+async def calculate_roi_endpoint(payload: ROICalculationInput) -> ROIResult:
     return calculate_roi(payload)
 
 
@@ -77,29 +83,7 @@ async def get_analysis(
     user: CurrentUserDep,
 ) -> ProcessAnalyzeResponse:
     record = await service.get_analysis(analysis_id, user)
-    roi = (
-        ROIResultSchema.model_validate(record.roi_result, from_attributes=True)
-        if record.roi_result
-        else ROIResultSchema()
-    )
-    return ProcessAnalyzeResponse(
-        analysis_id=record.id,
-        status=record.status,
-        analysis=record.analysis_payload,
-        bottlenecks=record.bottlenecks_payload,
-        opportunities=[
-            {
-                "solution": r.solution,
-                "technology": r.technology,
-                "business_value": r.business_value,
-                "implementation_effort": r.implementation_effort,
-            }
-            for r in record.recommendations
-        ],
-        roi=roi,
-        total_tokens=record.total_tokens,
-        duration_ms=record.duration_ms,
-    )
+    return AnalysisService.to_response(record)
 
 
 @router.delete(

@@ -1,8 +1,14 @@
-"""Analysis orchestration: runs the agent pipeline and persists the result."""
+"""Analysis orchestration: runs the agent pipeline and persists the result.
+
+ROI is calculated exactly once, by :mod:`app.services.roi_service`, and the
+resulting object is threaded through scoring, persistence and the executive
+report without ever being recalculated.
+"""
 
 from __future__ import annotations
 
 import time
+from decimal import Decimal
 from typing import Sequence
 
 from app.agents import (
@@ -17,7 +23,7 @@ from app.core.logging import get_correlation_id, get_logger
 from app.models.analysis import Analysis, AnalysisStatus
 from app.models.process import Process
 from app.models.recommendation import Recommendation
-from app.models.roi import ROIResult
+from app.models.roi import ROIResult as ROIResultRow
 from app.repositories import (
     AnalysisRepository,
     AuditRepository,
@@ -29,12 +35,22 @@ from app.schemas.agent import (
     Bottleneck,
     ProcessAnalysis,
     ROIInput,
-    ROIResultSchema,
     TokenUsage,
 )
-from app.schemas.process import ProcessAnalyzeRequest, ProcessAnalyzeResponse
+from app.schemas.insight import (
+    AnalysisConfidence,
+    AutomationPotential,
+    QuickWin,
+    RecommendationDetail,
+    Roadmap,
+)
+from app.schemas.process import ProcessAnalyzeRequest, ProcessAnalyzeResponse, ProcessSummary
+from app.schemas.roi import ROIResult
 from app.schemas.user import CurrentUser
 from app.services.azure_openai import LLMClient
+from app.services.confidence_service import calculate_confidence
+from app.services.recommendation_service import build_recommendations, select_quick_wins
+from app.services.report_renderer import build_roadmap
 
 logger = get_logger(__name__)
 
@@ -90,53 +106,120 @@ class AnalysisService:
         usage += step_usage
 
         roi_input = request.roi_input or ROIInput()
-        roi, step_usage = await self._roi.run(
+        roi_stage, step_usage = await self._roi.run(
             roi_input=roi_input,
             analysis=analysis,
             opportunities=automation_plan.opportunities,
         )
         usage += step_usage
+        roi = roi_stage.roi  # <- the single source of truth from here on
+
+        confidence = calculate_confidence(
+            description=request.description,
+            analysis=analysis,
+            bottlenecks=bottleneck_report.bottlenecks,
+            roi_input=roi_stage.calculation_input,
+            document_context=document_context,
+        )
+        recommendations = build_recommendations(
+            opportunities=automation_plan.opportunities,
+            bottlenecks=bottleneck_report.bottlenecks,
+            roi=roi,
+            monthly_volume=roi_input.monthly_volume,
+            hourly_cost=Decimal(roi_input.hourly_cost),
+        )
+        quick_wins = select_quick_wins(recommendations)
+        roadmap = build_roadmap(recommendations, quick_wins)
 
         duration_ms = int((time.perf_counter() - started) * 1000)
         logger.info(
             "analysis_pipeline_completed",
             extra={
+                "correlation_id": get_correlation_id(),
                 "process_name": request.process_name,
                 "total_tokens": usage.total_tokens,
                 "duration_ms": duration_ms,
+                "confidence_score": confidence.score,
+                "recommendation_count": len(recommendations),
+                "quick_win_count": len(quick_wins),
             },
         )
 
-        analysis_id: str | None = None
-        if request.persist:
-            analysis_id = await self._persist(
-                request=request,
-                user=user,
-                analysis=analysis,
-                bottlenecks=bottleneck_report.bottlenecks,
-                opportunities=automation_plan.opportunities,
-                roi_input=roi_input,
-                roi=roi,
-                usage=usage,
-                duration_ms=duration_ms,
-            )
-
-        return ProcessAnalyzeResponse(
-            analysis_id=analysis_id,
+        response = ProcessAnalyzeResponse(
+            analysis_id=None,
             status=AnalysisStatus.COMPLETED,
+            process=ProcessSummary.from_analysis(analysis),
             analysis=analysis,
+            automation_potential=roi_stage.automation_potential,
+            confidence=confidence,
             bottlenecks=bottleneck_report.bottlenecks,
-            opportunities=automation_plan.opportunities,
+            recommendations=recommendations,
+            quick_wins=quick_wins,
             roi=roi,
+            roadmap=roadmap,
+            opportunities=automation_plan.opportunities,
             total_tokens=usage.total_tokens,
             duration_ms=duration_ms,
         )
+
+        if request.persist:
+            response.analysis_id = await self._persist(
+                request=request,
+                user=user,
+                response=response,
+                roi_input=roi_input,
+                usage=usage,
+            )
+        return response
 
     async def get_analysis(self, analysis_id: str, user: CurrentUser) -> Analysis:
         analysis = await self._analysis_repo.get(analysis_id)
         if analysis is None or analysis.owner_id != user.id:
             raise NotFoundError(f"Analysis '{analysis_id}' was not found.")
         return analysis
+
+    @staticmethod
+    def to_response(record: Analysis) -> ProcessAnalyzeResponse:
+        """Rehydrate a stored analysis without recalculating a single figure."""
+        analysis = ProcessAnalysis.model_validate(record.analysis_payload)
+        roi = (
+            ROIResult.model_validate(record.roi_result, from_attributes=True)
+            if record.roi_result
+            else ROIResult()
+        )
+        if record.roi_result is not None:
+            # The ORM row stores the canonical values under their legacy column names.
+            roi = roi.model_copy(
+                update={
+                    "current_monthly_hours": roi.current_hours,
+                    "monthly_productivity_value": roi.monthly_savings,
+                    "annual_productivity_value": roi.annual_savings,
+                }
+            )
+        return ProcessAnalyzeResponse(
+            analysis_id=record.id,
+            status=record.status,
+            process=ProcessSummary.from_analysis(analysis),
+            analysis=analysis,
+            automation_potential=AutomationPotential.model_validate(
+                record.automation_potential_payload or {}
+            ),
+            confidence=AnalysisConfidence.model_validate(record.confidence_payload or {}),
+            bottlenecks=[Bottleneck.model_validate(b) for b in record.bottlenecks_payload or []],
+            recommendations=[
+                RecommendationDetail.model_validate(r)
+                for r in record.recommendations_payload or []
+            ],
+            quick_wins=[QuickWin.model_validate(q) for q in record.quick_wins_payload or []],
+            roi=roi,
+            roadmap=Roadmap.model_validate(record.roadmap_payload or {}),
+            opportunities=[
+                AutomationOpportunity.model_validate(o)
+                for o in record.opportunities_payload or []
+            ],
+            total_tokens=record.total_tokens,
+            duration_ms=record.duration_ms,
+        )
 
     async def list_analyses(
         self, user: CurrentUser, *, limit: int, offset: int
@@ -145,8 +228,11 @@ class AnalysisService:
         total = await self._analysis_repo.count(owner_id=user.id)
         return items, total
 
-    async def attach_report(self, analysis: Analysis, report: str, tokens: int) -> None:
-        analysis.executive_report = report
+    async def attach_report(
+        self, analysis: Analysis, report_payload: dict, markdown: str, tokens: int
+    ) -> None:
+        analysis.executive_report = markdown
+        analysis.report_payload = report_payload
         analysis.total_tokens += tokens
         await self._analysis_repo.commit()
 
@@ -179,13 +265,9 @@ class AnalysisService:
         *,
         request: ProcessAnalyzeRequest,
         user: CurrentUser,
-        analysis: ProcessAnalysis,
-        bottlenecks: list[Bottleneck],
-        opportunities: list[AutomationOpportunity],
+        response: ProcessAnalyzeResponse,
         roi_input: ROIInput,
-        roi: ROIResultSchema,
         usage: TokenUsage,
-        duration_ms: int,
     ) -> str:
         process = await self._process_repo.add(
             Process(
@@ -197,35 +279,63 @@ class AnalysisService:
             )
         )
 
+        roi = response.roi
         record = Analysis(
             status=AnalysisStatus.COMPLETED,
-            process_name=analysis.process_name or request.process_name,
-            analysis_payload=analysis.model_dump(mode="json"),
-            bottlenecks_payload=[b.model_dump(mode="json") for b in bottlenecks],
+            process_name=response.analysis.process_name or request.process_name,
+            analysis_payload=response.analysis.model_dump(mode="json"),
+            bottlenecks_payload=[b.model_dump(mode="json") for b in response.bottlenecks],
+            opportunities_payload=[o.model_dump(mode="json") for o in response.opportunities],
+            recommendations_payload=[r.model_dump(mode="json") for r in response.recommendations],
+            automation_potential_payload=response.automation_potential.model_dump(mode="json"),
+            confidence_payload=response.confidence.model_dump(mode="json"),
+            quick_wins_payload=[q.model_dump(mode="json") for q in response.quick_wins],
+            roadmap_payload=response.roadmap.model_dump(mode="json"),
             total_tokens=usage.total_tokens,
-            duration_ms=duration_ms,
+            duration_ms=response.duration_ms,
             owner_id=user.id,
             process_id=process.id,
         )
         record.recommendations = [
             Recommendation(
-                solution=item.solution,
-                technology=item.technology,
-                business_value=item.business_value,
-                implementation_effort=str(item.implementation_effort),
+                solution=item.title,
+                technology=", ".join(item.recommended_technologies),
+                business_value=item.description,
+                implementation_effort=item.implementation_effort.value,
+                reference=item.id,
+                title=item.title,
+                description=item.description,
+                related_bottleneck_ids=item.related_bottleneck_ids,
+                priority=item.priority.value,
+                business_impact=item.business_impact.value,
+                implementation_complexity=item.implementation_complexity.value,
+                estimated_hours_saved_per_month=float(item.estimated_hours_saved_per_month),
+                estimated_monthly_value=float(item.estimated_monthly_value),
+                estimated_annual_value=float(item.estimated_annual_value),
+                recommended_technologies=item.recommended_technologies,
+                expected_benefits=item.expected_benefits,
+                dependencies=item.dependencies,
+                implementation_notes=item.implementation_notes,
+                implementation_timeframe_days=item.implementation_timeframe_days,
+                recommendation_score=item.recommendation_score,
+                score_explanation=item.score_explanation,
             )
-            for item in opportunities
+            for item in response.recommendations
         ]
-        record.roi_result = ROIResult(
+        record.roi_result = ROIResultRow(
             monthly_volume=roi_input.monthly_volume,
-            minutes_per_transaction=roi_input.minutes_per_transaction,
-            employee_hourly_rate=roi_input.employee_hourly_rate,
-            automation_rate=roi_input.automation_rate,
-            current_hours=roi.current_hours,
-            estimated_hours_saved=roi.estimated_hours_saved,
-            monthly_savings=roi.monthly_savings,
-            annual_savings=roi.annual_savings,
-            roi_score=roi.roi_score,
+            minutes_per_transaction=float(roi_input.minutes_per_case),
+            employee_hourly_rate=float(roi_input.hourly_cost),
+            automation_rate=float(roi.automation_potential_percentage) / 100,
+            automation_potential_percentage=float(roi.automation_potential_percentage),
+            current_hours=float(roi.current_monthly_hours),
+            estimated_hours_saved=float(roi.estimated_hours_saved),
+            remaining_monthly_hours=float(roi.remaining_monthly_hours),
+            monthly_savings=float(roi.monthly_productivity_value),
+            annual_savings=float(roi.annual_productivity_value),
+            roi_score=float(roi.roi_score),
+            calculation_method=roi.calculation_method,
+            assumptions=roi.assumptions,
         )
         await self._analysis_repo.add(record)
 

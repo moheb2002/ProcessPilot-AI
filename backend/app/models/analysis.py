@@ -35,6 +35,16 @@ class Analysis(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     process_name: Mapped[str] = mapped_column(String(255), nullable=False)
     analysis_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     bottlenecks_payload: Mapped[list[Any]] = mapped_column(JSON, default=list, nullable=False)
+    opportunities_payload: Mapped[list[Any]] = mapped_column(JSON, default=list, nullable=False)
+    #: Scored RecommendationDetail objects, stored verbatim so the report reuses them.
+    recommendations_payload: Mapped[list[Any]] = mapped_column(JSON, default=list, nullable=False)
+    automation_potential_payload: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    confidence_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    quick_wins_payload: Mapped[list[Any]] = mapped_column(JSON, default=list, nullable=False)
+    roadmap_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    report_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     executive_report: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     total_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

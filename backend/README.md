@@ -90,9 +90,11 @@ flowchart LR
     A[Process description<br/>+ optional documents] --> B[1. Process Analyzer]
     B --> C[2. Bottleneck Detection]
     C --> D[3. Automation Advisor]
-    D --> E[4. ROI Agent]
-    E --> F[5. Executive Summary]
-    F --> G[Markdown report]
+    D --> E[4. Automation potential<br/>estimate]
+    E --> F[ROI engine<br/>deterministic]
+    F --> G[Confidence +<br/>recommendation scoring]
+    G --> H[5. Report narrative<br/>prose only]
+    H --> I[Report renderer<br/>injects validated ROI]
 ```
 
 | # | Agent | Output contract |
@@ -100,25 +102,108 @@ flowchart LR
 | 1 | **Process Analyzer** | `process_name`, `actors`, `systems`, `steps`, `approvals`, `manual_tasks` |
 | 2 | **Bottleneck Detection** | `bottlenecks[] { title, severity, impact, recommendation }` |
 | 3 | **Automation Advisor** | `opportunities[] { solution, technology, business_value, implementation_effort }` |
-| 4 | **ROI Agent** | `current_hours`, `estimated_hours_saved`, `monthly_savings`, `annual_savings`, `roi_score` |
-| 5 | **Executive Summary** | Markdown: Current State, Key Pain Points, Recommended Solutions, Expected Benefits, ROI, Implementation Roadmap |
+| 4 | **ROI Agent** | An *automation potential percentage* only — all maths is done by `app/services/roi_service.py` |
+| 5 | **Executive Summary** | Structured JSON **narrative only** (`ReportNarrative`); every figure is injected by the backend |
+
+Between agents 4 and 5 three deterministic services run — they never call an LLM:
+
+| Service | Module | Responsibility |
+|---------|--------|----------------|
+| ROI engine | `app/services/roi_service.py` | The single source of truth for every ROI figure |
+| Confidence scoring | `app/services/confidence_service.py` | 0-100 evidence score and the gaps behind it |
+| Recommendation scoring | `app/services/recommendation_service.py` | Scores, priorities, savings allocation, Quick Wins |
+| Report assembly | `app/services/report_renderer.py` | Renders the Markdown, injecting validated numbers |
+
+All tunable weights live in `app/core/scoring_config.py`.
 
 The Automation Advisor is prompted to prioritise Microsoft 365 Copilot, Power Automate,
 Power Apps, Azure AI Foundry, Azure OpenAI, Azure AI Search, Azure Document Intelligence and
 Microsoft Graph.
 
-**ROI is deterministic, not hallucinated.** The LLM only estimates the *automation rate*; the
-financial maths lives in the pure function `calculate_roi()`:
+---
+
+### ROI: one calculation, reused everywhere
+
+**The LLM never calculates, adjusts, rounds or restates ROI.** It supplies a single input —
+the automation potential — and everything else is computed once by `calculate_roi()` and
+threaded unchanged through the analysis response, persistence and the executive report.
 
 ```
-current_hours          = monthly_volume * minutes_per_transaction / 60
-estimated_hours_saved  = current_hours * automation_rate
-monthly_savings        = estimated_hours_saved * employee_hourly_rate
-annual_savings         = monthly_savings * 12
-roi_score              = (annual_savings - implementation_cost) / implementation_cost * 100
-                         (or annual_savings normalised to a reference when no cost is given,
-                          clamped to 0-100)
+current_monthly_hours      = monthly_volume * minutes_per_case / 60
+estimated_hours_saved      = current_monthly_hours * automation_potential_percentage / 100
+remaining_monthly_hours    = current_monthly_hours - estimated_hours_saved
+monthly_productivity_value = estimated_hours_saved * hourly_cost
+annual_productivity_value  = monthly_productivity_value * 12
+roi_score                  = (annual_productivity_value - implementation_cost)
+                             / implementation_cost * 100
+                             (or normalised against a reference saving when no cost is
+                              supplied, clamped to 0-100)
 ```
+
+Calculation rules:
+
+- All arithmetic uses `Decimal`. No intermediate value is rounded.
+- Rounding is applied **once**, when the result object is built:
+  hours ≤ 2 dp, currency exactly 2 dp, percentages ≤ 1 dp.
+- The annual value is derived from the *unrounded* monthly value, so
+  `5.8333… → 5.83` per month and `70.00` per year (not `69.96`).
+- Small positive values never collapse to zero.
+
+Worked examples:
+
+| Input | Current hours | Hours saved | Monthly value | Annual value |
+|-------|---------------|-------------|---------------|--------------|
+| volume 1, 35 min, $20/h, 50% | 0.58 | 0.29 | 5.83 | 70.00 |
+| volume 120, 40 min, $28/h, 55% | 80 | 44 (36 remaining) | 1232.00 | 14784.00 |
+
+Assumptions recorded on every `ROIResult`:
+
+- Volume, handling time and hourly cost are steady-state monthly averages.
+- Hourly cost is the fully loaded internal cost of the people performing the work.
+- Savings are recovered capacity (productivity value), not headcount reduction or cash released.
+- The remaining hours cover exceptions, judgement and oversight.
+- Implementation, licensing and change-management costs are excluded.
+- Recommendation-level hours are **directional** estimates apportioned from the overall total;
+  they sum to — and can never exceed — `roi.estimated_hours_saved`, so shared savings are not
+  double counted.
+
+Consistency guarantees, all covered by tests in
+`tests/integration/test_roi_consistency.py`:
+
+1. `POST /api/v1/report/generate` accepts only an `analysis_id` or a complete, already-validated
+   `analysis_result`. There is no field through which ROI inputs can be re-supplied.
+2. The report's `roi` object is the analysis's `roi` object, verified by
+   `assert_roi_consistency()`.
+3. The Business Case section of the Markdown is rendered by the backend from that object.
+4. Any figure the model introduces that is not backed by the ROI engine is logged as
+   `report_narrative_contains_unbacked_figures` and flagged via `executive_report.roi_overridden`.
+
+### Analysis confidence
+
+Scored deterministically out of 100 (weights in `scoring_config.py`):
+process-description completeness 25, operational metrics 25, actors and systems 15,
+detected steps 15, detected bottlenecks 10, ROI-input completeness 10.
+Levels: **High** ≥ 90, **Medium** 70–89, **Low** < 70. The LLM may explain the score but
+never produces it.
+
+### Recommendation scoring and Quick Wins
+
+```
+recommendation_score = (business_impact + frequency + risk_reduction) / implementation_effort
+```
+with impact/risk `Critical=4 High=3 Medium=2 Low=1`, effort `Low=1 Medium=2 High=3`,
+frequency `Very High=4 High=3 Medium=2 Low=1`, normalised from the raw range 1–12 onto 0–100.
+Recommendations are returned sorted by score, each with a `score_explanation`.
+
+A recommendation becomes a Quick Win only when it is Low/Medium effort, High/Critical impact,
+deliverable within 30 days and has at most two dependencies. At most three are returned,
+ranked by expected value.
+
+### Executive report structure
+
+1. Executive Summary · 2. Analysis Confidence · 3. Current State Assessment · 4. Key Pain Points ·
+5. Quick Wins · 6. Recommended Solutions · 7. Prioritised Action Plan · 8. Business Case and ROI ·
+9. 30-60-90 Day Roadmap · 10. Risks and Dependencies · 11. Executive Recommendation
 
 ---
 
@@ -226,13 +311,22 @@ Every error uses one envelope:
 |-------|---------|
 | `User` | Account, hashed password, role |
 | `Process` | The submitted process description and metadata |
-| `Analysis` | Pipeline run: status, structured analysis, bottlenecks, report, token/latency metrics |
-| `Recommendation` | One automation opportunity (child of `Analysis`) |
-| `ROIResult` | Inputs and computed savings (child of `Analysis`) |
+| `Analysis` | Pipeline run: status, structured analysis, bottlenecks, scored recommendations, confidence, Quick Wins, roadmap, report, token/latency metrics |
+| `Recommendation` | One scored automation recommendation with priority, impact, effort and allocated savings (child of `Analysis`) |
+| `ROIResult` | The validated ROI inputs, outputs, calculation method and assumptions (child of `Analysis`) |
 | `UploadedDocument` | File metadata, storage URI, extracted text |
 | `AuditLog` | Immutable action trail with actor and correlation id |
 
 All tables use UUID string primary keys and timezone-aware `created_at` / `updated_at`.
+
+**Schema updates.** Startup runs `create_all` followed by `sync_schema()`, which adds any
+column a model has gained since the database file was created and backfills its default.
+`create_all` alone only creates missing *tables*, so without this an existing SQLite file
+fails on startup with `no such column`. The step is additive and idempotent — it never drops
+or rewrites data. Rows written before the ROI engine also have
+`automation_potential_percentage` and `remaining_monthly_hours` derived from their stored
+hours, because the old `automation_rate` column is the one that carried the original defect.
+Use Alembic (already a dependency) for real migrations in production.
 
 ---
 
@@ -283,6 +377,10 @@ pytest --cov=app --cov-report=term-missing --cov-report=html
 # subsets
 pytest tests/unit
 pytest tests/integration
+
+# the ROI guarantees specifically
+pytest tests/unit/test_roi_agent.py tests/unit/test_scoring_services.py
+pytest tests/integration/test_roi_consistency.py
 ```
 
 Tests run entirely offline: an in-memory SQLite database per test, the mock LLM, and a
