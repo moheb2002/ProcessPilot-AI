@@ -326,5 +326,3 @@ are never logged.
 
 ## License
 
-No license file is currently present. Add a `LICENSE` before distributing or open-sourcing
-this project.
